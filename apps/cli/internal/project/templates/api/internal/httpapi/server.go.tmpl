@@ -1,0 +1,85 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
+)
+
+func NewServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr: address, Handler: handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+// Serve owns the listener and waits for active requests before returning on cancellation.
+func Serve(ctx context.Context, server *http.Server, listener net.Listener, shutdownTimeout time.Duration) error {
+	defer server.Close()
+	finished := make(chan error, 1)
+	go func() { finished <- server.Serve(listener) }()
+	select {
+	case err := <-finished:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			closeErr := server.Close()
+			<-finished
+			return fmt.Errorf("HTTP shutdown: %w", errors.Join(err, closeErr))
+		}
+		err := <-finished
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+func CheckHealth(ctx context.Context, endpoint string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("health request: %w", err)
+	}
+	// Local health checks must not use an ambient HTTP proxy or follow redirects.
+	transport := &http.Transport{Proxy: nil}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport, Timeout: 2 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("health request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("health returned HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, 1025))
+	if err != nil {
+		return fmt.Errorf("health response: %w", err)
+	}
+	if len(data) > 1024 {
+		return fmt.Errorf("health response exceeds 1024 bytes")
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return fmt.Errorf("health response: %w", err)
+	}
+	if body.Status != "ok" {
+		return fmt.Errorf("health status is %q, expected ok", body.Status)
+	}
+	return nil
+}

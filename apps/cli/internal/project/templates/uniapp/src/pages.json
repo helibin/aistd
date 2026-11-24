@@ -1,0 +1,6 @@
+{
+  "pages": [
+    { "path": "pages/index/index", "style": { "navigationBarTitleText": "AISTD_PROJECT_NAME" } }
+  ],
+  "globalStyle": { "navigationBarTextStyle": "black", "backgroundColor": "#ffffff" }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "hello-aistd",
+  "api": true,
+  "web": true,
+  "apiStack": "go",
+  "webStack": "react",
+  "visual": true
+}

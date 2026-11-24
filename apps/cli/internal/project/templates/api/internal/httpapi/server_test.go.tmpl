@@ -1,0 +1,210 @@
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"example.com/PROJECT/api/internal/config"
+)
+
+func TestHealthCheckUsesConfiguredHTTPAddress(t *testing.T) {
+	server := httptest.NewServer(NewHandler(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	address := strings.TrimPrefix(server.URL, "http://")
+	t.Setenv("HTTP_ADDR", address)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckHealth(context.Background(), cfg.HealthURL); err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	server.Close()
+	if err := CheckHealth(context.Background(), cfg.HealthURL); err == nil {
+		t.Fatal("health check accepted a stopped server")
+	}
+}
+
+func TestHealthCheckRejectsInvalidResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"status", 503, `{"status":"ok"}`},
+		{"redirect", 302, `{"status":"ok"}`},
+		{"not-json", 200, "ok"},
+		{"wrong-value", 200, `{"status":"ready"}`},
+		{"extra-json", 200, `{"status":"ok"} {}`},
+		{"oversized", 200, `{"status":"ok"}` + strings.Repeat(" ", 1024)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", "/api/health/live")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			if err := CheckHealth(context.Background(), server.URL); err == nil {
+				t.Fatal("accepted unhealthy response")
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := CheckHealth(ctx, "http://127.0.0.1:1/api/health/live"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled health request = %v", err)
+	}
+}
+
+func TestServerTimeouts(t *testing.T) {
+	server := NewServer(":8080", http.NotFoundHandler())
+	if server.ReadHeaderTimeout <= 0 || server.ReadTimeout <= 0 || server.WriteTimeout <= 0 || server.IdleTimeout <= 0 {
+		t.Fatal("server has an unbounded I/O timeout")
+	}
+}
+
+func TestServeWaitsForInflightRequest(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	server := NewServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		_, _ = io.WriteString(w, "finished")
+	}))
+	shutdown := make(chan struct{})
+	server.RegisterOnShutdown(func() { close(shutdown) })
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer server.Close()
+	finished := make(chan error, 1)
+	go func() { finished <- Serve(ctx, server, listener, time.Second) }()
+	response := make(chan error, 1)
+	go func() {
+		client := &http.Client{Timeout: 3 * time.Second}
+		res, err := client.Get("http://" + listener.Addr().String())
+		if err != nil {
+			response <- err
+			return
+		}
+		defer res.Body.Close()
+		body, err := io.ReadAll(res.Body)
+		if err == nil && string(body) != "finished" {
+			err = errors.New("inflight response was lost")
+		}
+		response <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("request never entered handler")
+	}
+	cancel()
+	select {
+	case <-shutdown:
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("shutdown never started")
+	}
+	select {
+	case err := <-finished:
+		close(release)
+		t.Fatalf("returned before inflight request completed: %v", err)
+	default:
+	}
+	close(release)
+	select {
+	case err := <-response:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("request did not finish")
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not finish")
+	}
+}
+
+func TestServeClosesConnectionsWhenShutdownExpires(t *testing.T) {
+	entered, disconnected := make(chan struct{}), make(chan struct{})
+	server := NewServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		close(disconnected)
+	}))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer server.Close()
+	finished := make(chan error, 1)
+	go func() { finished <- Serve(ctx, server, listener, 20*time.Millisecond) }()
+	response := make(chan error, 1)
+	go func() {
+		client := &http.Client{Timeout: 3 * time.Second}
+		res, err := client.Get("http://" + listener.Addr().String())
+		if res != nil {
+			res.Body.Close()
+		}
+		response <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("request never entered handler")
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("shutdown error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown did not honor deadline")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(3 * time.Second):
+		t.Fatal("active connection was not closed")
+	}
+	select {
+	case err := <-response:
+		if err == nil {
+			t.Fatal("forced connection close unexpectedly completed request")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client connection remained open")
+	}
+}
+
+func TestServeReturnsListenerFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
+	err = Serve(context.Background(), NewServer("", http.NotFoundHandler()), listener, time.Second)
+	if err == nil {
+		t.Fatal("ignored listener failure")
+	}
+}

@@ -1,0 +1,32 @@
+package main
+
+import (
+	"io"
+	"log/slog"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"example.com/PROJECT/api/internal/httpapi"
+)
+
+func TestHealthcheckCommand(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := httptest.NewServer(httpapi.NewHandler(logger))
+	t.Setenv("HTTP_ADDR", strings.TrimPrefix(server.URL, "http://"))
+	if err := run(logger, []string{"--healthcheck"}); err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	server.Close()
+	if err := run(logger, []string{"--healthcheck"}); err == nil {
+		t.Fatal("healthcheck succeeded with no live server")
+	}
+	t.Setenv("HTTP_ADDR", "invalid")
+	if err := run(logger, nil); err == nil {
+		t.Fatal("invalid configuration was accepted")
+	}
+	if err := run(logger, []string{"unexpected"}); err == nil {
+		t.Fatal("unexpected arguments were accepted")
+	}
+}

@@ -1,0 +1,72 @@
+package httpapi
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"testing"
+)
+
+func TestRoutesAndAccessLogs(t *testing.T) {
+	ids := map[string]bool{}
+	for _, tc := range []struct {
+		method, path, key, value string
+		status                   int
+	}{
+		{http.MethodGet, "/api/health/live", "status", "ok", 200},
+		{http.MethodGet, "/api/health/ready", "status", "ready", 200},
+		{http.MethodGet, "/api/hello", "message", "hello", 200},
+		{http.MethodGet, "/missing", "", "", 404},
+		{http.MethodPost, "/api/hello", "", "", 405},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			var logs bytes.Buffer
+			handler := NewHandler(slog.New(slog.NewJSONHandler(&logs, nil)))
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(tc.method, tc.path, nil)
+			request.Header.Set("X-Request-ID", "untrusted")
+			handler.ServeHTTP(response, request)
+			if response.Code != tc.status {
+				t.Fatalf("status = %d, want %d", response.Code, tc.status)
+			}
+			if tc.key != "" {
+				var body map[string]string
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body[tc.key] != tc.value || len(body) != 1 {
+					t.Fatalf("body = %s, error = %v", response.Body.String(), err)
+				}
+				if response.Header().Get("Content-Type") != "application/json" {
+					t.Fatal("missing JSON content type")
+				}
+			}
+			id := response.Header().Get("X-Request-ID")
+			if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) || ids[id] {
+				t.Fatalf("invalid or reused request ID %q", id)
+			}
+			ids[id] = true
+			var record map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record["request_id"] != id || record["status"] != float64(tc.status) || record["method"] != tc.method || record["path"] != tc.path {
+				t.Fatalf("incorrect access log: %s", logs.String())
+			}
+			if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {
+				t.Fatalf("missing duration: %s", logs.String())
+			}
+		})
+	}
+}
+
+func TestStatusWriterKeepsFirstFinalStatus(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	writer := &statusWriter{ResponseWriter: recorder, status: http.StatusOK}
+	writer.WriteHeader(http.StatusAccepted)
+	writer.WriteHeader(http.StatusInternalServerError)
+	_, _ = writer.Write([]byte("accepted"))
+	if writer.status != http.StatusAccepted || recorder.Code != http.StatusAccepted || writer.Unwrap() != recorder {
+		t.Fatal("response status and log status diverged")
+	}
+}

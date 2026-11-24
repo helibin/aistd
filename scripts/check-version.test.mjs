@@ -1,0 +1,52 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {execFileSync, spawnSync} from 'node:child_process';
+
+const script = new URL('./check-version.mjs', import.meta.url).pathname;
+test('checks staged versions and history, and rejects an invalid intermediate commit in CI', t => {
+  const cwd = mkdtempSync(join(tmpdir(), 'aistd-version-'));
+  t.after(() => rmSync(cwd, {recursive: true, force: true}));
+  const git = (...args) => execFileSync('git', args, {cwd, encoding: 'utf8', stdio: 'pipe'}).trim();
+  const put = (path, value) => writeFileSync(join(cwd, path), value);
+  const run = (...args) => spawnSync(process.execPath, [script, ...args], {cwd, encoding: 'utf8'});
+  git('init'); git('config', 'user.name', 'Version Test'); git('config', 'user.email', 'version@example.invalid');
+  git('config', 'core.hooksPath', '/dev/null');
+  for (const app of ['cli', 'web']) {
+    mkdirSync(join(cwd, 'apps', app), {recursive: true});
+    put(`apps/${app}/VERSION`, '0.1.0\n');
+    put(`apps/${app}/CHANGELOG.md`, '# Changelog\n\n## [0.1.0] - 2026-11-16\n\n- Initial.\n');
+  }
+  put('apps/web/package.json', '{"version":"0.1.0"}');
+  put('package-lock.json', '{"packages":{"apps/web":{"version":"0.1.0"}}}');
+  git('add', 'apps', 'package-lock.json'); git('commit', '-m', 'baseline');
+  const baseline = git('rev-parse', 'HEAD');
+  put('apps/cli/main.go', '// change\n'); git('add', 'apps/cli/main.go');
+  assert.equal(run().status, 1, 'missing bump');
+  put('apps/cli/VERSION', '0.2.0\n'); git('add', 'apps/cli/VERSION');
+  assert.equal(run().status, 1, 'missing changelog');
+  const old = readFileSync(join(cwd, 'apps/cli/CHANGELOG.md'), 'utf8');
+  put('apps/cli/CHANGELOG.md', old.replace('# Changelog\n', '# Changelog\n\n## [0.2.0] - 2026-11-17\n\n- Upgrade.\n'));
+  git('add', 'apps/cli/CHANGELOG.md');
+  assert.equal(run().status, 0, run().stderr);
+  git('commit', '-m', 'feat: upgrade');
+  assert.equal(run('--range', `${baseline}..HEAD`).status, 0);
+  put('apps/cli/main.go', '// another change\n'); git('add', 'apps/cli/main.go');
+  git('commit', '-m', 'invalid version');
+  assert.equal(run('--range', `${baseline}..HEAD`).status, 1, 'CI checks each commit');
+  put('apps/web/VERSION', '0.1.1\n');
+  put('apps/web/CHANGELOG.md', '# Changelog\n\n## [0.1.1] - 2026-11-17\n\n- Fix.\n\n## [0.1.0] - 2026-11-16\n\n- Initial.\n');
+  git('add', 'apps/web');
+  assert.equal(run().status, 1, 'website package mismatch');
+  put('apps/web/package.json', '{"version":"0.1.1"}');
+  put('package-lock.json', '{"packages":{"apps/web":{"version":"0.1.1"}}}');
+  git('add', 'apps/web/package.json', 'package-lock.json');
+  assert.equal(run().status, 0, run().stderr);
+  put('apps/web/CHANGELOG.md', '# Changelog\n\n## [0.1.1] - 2026-11-17\n\n- Replaced history.\n');
+  git('add', 'apps/web/CHANGELOG.md');
+  assert.equal(run().status, 1, 'release history cannot be removed');
+  put('apps/web/VERSION', '0.0.9\n'); git('add', 'apps/web/VERSION');
+  assert.equal(run().status, 1, 'version cannot decrease');
+});

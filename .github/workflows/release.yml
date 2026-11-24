@@ -1,0 +1,30 @@
+name: release-build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/cli/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: make release
+      - run: docker build -t aistd:check .
+      - run: echo "version=$(cat apps/cli/VERSION)" >> "$GITHUB_ENV"
+      - run: echo "web_version=$(cat apps/web/VERSION)" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aistd-v${{ env.version }}
+          path: apps/cli/release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aistd-site-v${{ env.web_version }}
+          path: dist/

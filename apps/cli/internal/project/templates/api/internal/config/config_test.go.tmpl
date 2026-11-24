@@ -1,0 +1,42 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestLoad(t *testing.T) {
+	for _, tc := range []struct{ address, wantAddress, wantURL string }{
+		{"", ":8080", "http://127.0.0.1:8080/api/health/live"},
+		{":9090", ":9090", "http://127.0.0.1:9090/api/health/live"},
+		{"0.0.0.0:9090", "0.0.0.0:9090", "http://127.0.0.1:9090/api/health/live"},
+		{"127.0.0.1:9090", "127.0.0.1:9090", "http://127.0.0.1:9090/api/health/live"},
+		{"localhost:9090", "localhost:9090", "http://localhost:9090/api/health/live"},
+		{"[::]:9090", "[::]:9090", "http://[::1]:9090/api/health/live"},
+		{"[::ffff:0.0.0.0]:9090", "[::ffff:0.0.0.0]:9090", "http://127.0.0.1:9090/api/health/live"},
+		{"[::1]:9090", "[::1]:9090", "http://[::1]:9090/api/health/live"},
+		{"[fe80::1%lo0]:9090", "[fe80::1%lo0]:9090", "http://[fe80::1%25lo0]:9090/api/health/live"},
+	} {
+		t.Run(tc.address, func(t *testing.T) {
+			t.Setenv("HTTP_ADDR", tc.address)
+			cfg, err := Load()
+			if err != nil || cfg.HTTPAddr != tc.wantAddress || cfg.HealthURL != tc.wantURL {
+				t.Fatalf("Load() = %+v, %v", cfg, err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidAddress(t *testing.T) {
+	for _, address := range []string{
+		"8080", "localhost", "http://localhost:8080", ":", ":0", ":65536", ":-1", ":+80", ":http",
+		" :8080", "localhost:8080 ", "::1:8080", "[broken]:8080", "[127.0.0.1]:8080", "bad/host:8080", "bad_host:8080", "-bad:8080", ".:8080",
+	} {
+		t.Run(address, func(t *testing.T) {
+			t.Setenv("HTTP_ADDR", address)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HTTP_ADDR") {
+				t.Fatalf("accepted invalid HTTP_ADDR %q: %v", address, err)
+			}
+		})
+	}
+}

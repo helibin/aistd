@@ -1,0 +1,66 @@
+package config
+
+import (
+	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+type Config struct {
+	HTTPAddr  string
+	HealthURL string
+}
+
+var hostname = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
+
+func Load() (Config, error) {
+	address := os.Getenv("HTTP_ADDR")
+	if address == "" {
+		address = ":8080"
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return Config{}, fmt.Errorf("HTTP_ADDR must be host:port (IPv6: [address]:port): %w", err)
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil || number < 1 || number > 65535 || strings.Trim(port, "0123456789") != "" {
+		return Config{}, fmt.Errorf("HTTP_ADDR port must be a number from 1 to 65535")
+	}
+	healthHost := host
+	switch {
+	case host == "":
+		healthHost = "127.0.0.1"
+	default:
+		if ip, err := netip.ParseAddr(host); err == nil {
+			if strings.HasPrefix(address, "[") && !ip.Is6() {
+				return Config{}, fmt.Errorf("HTTP_ADDR brackets require an IPv6 address")
+			}
+			if ip.Unmap().IsUnspecified() {
+				if ip.Is4() || ip.Is4In6() {
+					healthHost = "127.0.0.1"
+				} else {
+					healthHost = "::1"
+				}
+			}
+		} else {
+			if strings.HasPrefix(address, "[") {
+				return Config{}, fmt.Errorf("HTTP_ADDR brackets require an IPv6 address")
+			}
+			if len(host) > 253 {
+				return Config{}, fmt.Errorf("HTTP_ADDR hostname is too long")
+			}
+			for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+				if !hostname.MatchString(label) {
+					return Config{}, fmt.Errorf("HTTP_ADDR contains an invalid hostname")
+				}
+			}
+		}
+	}
+	endpoint := url.URL{Scheme: "http", Host: net.JoinHostPort(healthHost, port), Path: "/api/health/live"}
+	return Config{HTTPAddr: address, HealthURL: endpoint.String()}, nil
+}

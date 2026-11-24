@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "product": "aistd website",
+    "revision": 5,
+    "theme": "dark product-led opening with light configuration and reference bands"
+  },
+  "primitive": {
+    "ink": "#090b0d",
+    "inkSoft": "#151a1f",
+    "paper": "#f5f7f8",
+    "white": "#ffffff",
+    "mutedSurface": "#e9eef1",
+    "ice": "#b9e5f7",
+    "blue": "#126185",
+    "error": "#a72f32",
+    "space": [4, 8, 12, 16, 24, 32, 40, 48]
+  },
+  "semantic": {
+    "color.background.page": "#f5f7f8",
+    "color.background.hero": "#090b0d",
+    "color.surface.default": "#ffffff",
+    "color.surface.muted": "#e9eef1",
+    "color.text.primary": "#172027",
+    "color.text.secondary": "#5f6d78",
+    "color.text.onDark": "#f8fafb",
+    "color.text.mutedOnDark": "#a9b3bd",
+    "color.border.default": "#d3dce2",
+    "color.action.primary": "#f8fafb",
+    "color.action.onPrimary": "#090b0d",
+    "color.action.onLight": "#126185",
+    "color.code.accent": "#b9e5f7",
+    "color.border.onDark": "#303942",
+    "color.feedback.error": "#a72f32"
+  },
+  "type": {
+    "family.body": "-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, sans-serif",
+    "family.code": "ui-monospace, SFMono-Regular, Menlo, monospace",
+    "body.size": 16,
+    "body.lineHeight": 1.6,
+    "label.size": 14,
+    "caption.size": 12,
+    "display.desktop.size": 84,
+    "display.mobile.size": 40,
+    "heading.desktop.size": 48,
+    "heading.mobile.size": 34
+  },
+  "component": {
+    "button.height": 48,
+    "button.radius": 4,
+    "input.height": 52,
+    "tool.radius": 6,
+    "focus.width": 2
+  }
+}

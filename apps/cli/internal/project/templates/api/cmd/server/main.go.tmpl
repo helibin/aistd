@@ -1,0 +1,51 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"example.com/PROJECT/api/internal/config"
+	"example.com/PROJECT/api/internal/httpapi"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := run(logger, os.Args[1:]); err != nil {
+		logger.Error("server_failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger, args []string) error {
+	flags := flag.NewFlagSet("server", flag.ContinueOnError)
+	healthcheck := flags.Bool("healthcheck", false, "check the configured HTTP live endpoint")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if *healthcheck {
+		return httpapi.CheckHealth(context.Background(), cfg.HealthURL)
+	}
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("HTTP listen: %w", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.NewHandler(logger))
+	logger.Info("starting", "address", listener.Addr().String())
+	return httpapi.Serve(ctx, server, listener, 5*time.Second)
+}

@@ -1,0 +1,69 @@
+package httpapi
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+func NewHandler(logger *slog.Logger) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health/live", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /api/health/ready", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]string{"status": "ready"})
+	})
+	mux.HandleFunc("GET /api/hello", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]string{"message": "hello"})
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			logger.Error("request_id_failed", "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		requestID := hex.EncodeToString(id[:])
+		w.Header().Set("X-Request-ID", requestID)
+		response := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		mux.ServeHTTP(response, r)
+		logger.Info("http_request", "request_id", requestID, "method", r.Method, "path", r.URL.Path,
+			"status", response.status, "duration_ms", time.Since(start).Milliseconds())
+	})
+}
+
+// shortcut: JSON routes do not stream or hijack connections; use ResponseController when adding those routes.
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *statusWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	if status >= 200 {
+		w.status, w.wroteHeader = status, true
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
+}
